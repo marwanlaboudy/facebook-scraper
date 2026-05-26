@@ -50,7 +50,7 @@ def get_sheet():
     client = gspread.authorize(creds)
 
     return client.open(
-        "marketplace_leads"
+        "facebook"
     ).sheet1
 
 # ────────────────────────────────────────────────────────
