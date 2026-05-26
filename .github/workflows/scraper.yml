@@ -27,4 +27,4 @@ jobs:
         env:
           FB_SESSION: ${{ secrets.FB_SESSION }}
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
-        run: python marketplace_full.py
+        run: python scraper.py
