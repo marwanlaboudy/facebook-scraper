@@ -88,20 +88,25 @@ def bbox_ok(el):
         return False
 
 def click_continue_if_present(page):
+    log("Checking for 'Continue' or 'Profile Confirmation' prompts...")
     try:
-        btns = page.query_selector_all('[role="button"]')
-        for b in btns:
-            try:
-                if (b.inner_text() or "").strip().lower() == "continue":
-                    if bbox_ok(b):
-                        b.click()
-                        ok("Clicked Continue button")
-                        page.wait_for_timeout(5000)
-                        return True
-            except Exception:
-                pass
-    except Exception:
-        pass
+        # Array of possible locators for Meta's Continue buttons
+        possible_locators = [
+            page.get_by_role("button", name=re.compile(r"^Continue$|^متابعة$", re.IGNORECASE)),
+            page.locator('div[role="button"]:has-text("Continue")'),
+            page.locator('div[aria-label="Continue"]'),
+            page.locator('text="Continue"').locator("visible=true")
+        ]
+        
+        for loc in possible_locators:
+            if loc.count() > 0 and loc.first.is_visible():
+                loc.first.click()
+                ok("✅ Clicked 'Continue' profile button!")
+                page.wait_for_timeout(5000) # Wait for the redirect to finish
+                return True
+    except Exception as e:
+        warn(f"Continue check error: {e}")
+        
     return False
 
 def stop_background_scroll(page):
@@ -296,7 +301,7 @@ def main():
         page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
 
-        # Click Continue if present
+        # Click Continue if present on main page
         click_continue_if_present(page)
         page.wait_for_timeout(3000)
 
@@ -336,6 +341,11 @@ def main():
         for attempt in range(3):
             try:
                 page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=120000)
+                
+                # ── NEW: Handle the profile intercept screen here ──
+                page.wait_for_timeout(3000)
+                click_continue_if_present(page)
+                
                 break
             except Exception as e:
                 warn(f"goto attempt {attempt+1} failed: {str(e)[:80]}")
