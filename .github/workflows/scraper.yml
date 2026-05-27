@@ -1,22 +1,46 @@
-name: Marketplace Scraper
+name: Facebook Login Checker
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [check-facebook-login]
+
 jobs:
-  scrape:
-    runs-on: ubuntu-22.04
+  check:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Load Facebook session
+        run: |
+          echo "${{ secrets.FACEBOOK_SESSION }}" | base64 -d > facebook_session.json
+          echo "Session file size:"
+          wc -c facebook_session.json
+
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          playwright install chromium
-          playwright install-deps chromium
-      - name: Run scraper
-        env:
-          FB_SESSION: ${{ secrets.FB_SESSION }}
-          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
-        run: python scraper.py
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip xvfb fonts-freefont-ttf
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Run login check
+        id: login_check
+        run: |
+          xvfb-run -a python scraper.py
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: ✅ Login success message
+        if: success()
+        run: echo "🎉 Facebook session is VALID and logged in!"
+
+      - name: ❌ Login failed message
+        if: failure()
+        run: echo "💀 Facebook session is EXPIRED or INVALID!"
+
+      - name: Save screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-screenshot
+          path: login_check.png
