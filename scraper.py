@@ -260,19 +260,25 @@ def main():
         browser = pw.chromium.launch(headless=False, args=BROWSER_ARGS, slow_mo=60)
         context = browser.new_context()
 
-        # Load session
-        with open("facebook_session.json") as f:
-            session = json.load(f)
-        context.add_cookies(session["cookies"])
-
-        # ── PHASE 1: Collect listings ─────────────────
-        print("\n=== PHASE 1: COLLECTING LISTINGS ===")
+        # ── PHASE 1: Collect listings & Handle Login ──
+        print("\n=== PHASE 1: COLLECTING LISTINGS & LOGIN ===")
         _step = 0
+
+        # Load session safely
+        session_file = "facebook_session.json"
+        session = {}
+        try:
+            with open(session_file) as f:
+                session = json.load(f)
+            context.add_cookies(session.get("cookies", []))
+            log("Loaded existing cookies")
+        except (FileNotFoundError, json.JSONDecodeError):
+            warn("No valid session found. Will start fresh.")
 
         page = context.new_page()
 
         # Restore localStorage
-        log("Restoring session")
+        log("Navigating to Facebook...")
         page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)
 
@@ -287,24 +293,44 @@ def main():
                         except Exception:
                             pass
 
-        page.reload()
+        page.reload(wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
 
         # Click Continue if present
         click_continue_if_present(page)
         page.wait_for_timeout(3000)
-        page.screenshot(path="after_continue.png")
 
-        # Check login
-        title = page.title()
-        url = page.url
-        log(f"After session restore — title: {title} | url: {url}")
-        if "log in" in title.lower() or "login" in url.lower():
-            err("❌ NOT LOGGED IN — session is expired or invalid")
-            page.screenshot(path="not_logged_in.png")
-            context.close()
-            sys.exit(1)
-        ok("✅ Logged in successfully")
+        # ── THE MANUAL LOGIN CHECK ──
+        title = page.title().lower()
+        url = page.url.lower()
+        
+        email_input = page.locator('input[name="email"]')
+        
+        if "log in" in title or "login" in url or email_input.is_visible():
+            warn("⚠️ NOT LOGGED IN! The bot is pausing for you.")
+            warn("👉 Please log in manually in the opened browser window.")
+            warn("⏳ You have 5 minutes to enter your email, password, and any 2FA codes...")
+            
+            try:
+                # Wait for the email input to disappear (meaning login was successful and we navigated away)
+                email_input.wait_for(state="hidden", timeout=300000) # 5 minute timeout
+                
+                # Give Facebook a few seconds to fully load the feed
+                page.wait_for_timeout(5000)
+                
+                ok("✅ Detected successful manual login!")
+                
+                # Save the new session so you don't have to do this next time
+                context.storage_state(path=session_file)
+                ok(f"✅ Saved fresh session to {session_file}")
+                
+            except Exception:
+                err("❌ Did not detect a successful login within 5 minutes.")
+                page.screenshot(path="login_timeout.png")
+                context.close()
+                sys.exit(1)
+        else:
+            ok("✅ Logged in successfully via existing session")
 
         # Go to marketplace
         for attempt in range(3):
@@ -314,9 +340,9 @@ def main():
             except Exception as e:
                 warn(f"goto attempt {attempt+1} failed: {str(e)[:80]}")
                 if attempt == 2:
-                    err("Could not load Facebook after 3 attempts.")
+                    err("Could not load Facebook Marketplace after 3 attempts.")
                     context.close()
-                    return
+                    sys.exit(1)
                 time.sleep(3)
 
         page.wait_for_timeout(8000)
