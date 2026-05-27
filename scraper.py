@@ -58,7 +58,7 @@ def send_to_sheets(results):
         ]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        sheet = client.open("products").sheet1
+        sheet = client.open("marketplace_leads").sheet1
 
         existing = sheet.get_all_values()
         if not existing:
