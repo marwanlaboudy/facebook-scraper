@@ -35,11 +35,11 @@ def check_login():
         # Take screenshot
         page.screenshot(path="login_check.png")
 
-        # ✅ Check 1: URL should NOT be login page
+        # Check 1: URL should NOT be login page
         current_url = page.url
         print(f"Current URL: {current_url}")
 
-        # ✅ Check 2: Look for logged-in elements
+        # Check 2: Look for logged-in elements
         logged_in_signals = [
             '[aria-label="Your profile"]',
             '[aria-label="Account"]',
@@ -57,14 +57,14 @@ def check_login():
             except:
                 pass
 
-        # ✅ Check 3: Page title shouldn't say "Log in"
+        # Check 3: Page title
         title = page.title()
         print(f"Page title: {title}")
 
-        # ✅ Check 4: No login form present
+        # Check 4: No login form present
         login_form = page.query_selector('input[name="email"]')
 
-        # --- Final verdict ---
+        # Final verdict
         is_logged_in = (
             "login" not in current_url.lower()
             and login_form is None
