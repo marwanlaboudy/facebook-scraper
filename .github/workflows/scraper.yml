@@ -12,10 +12,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Load Facebook session
+        env:
+          FACEBOOK_SESSION: ${{ secrets.FACEBOOK_SESSION }}
         run: |
-          echo "${{ secrets.FACEBOOK_SESSION }}" | base64 -d > facebook_session.json
-          echo "Session file size:"
+          echo "$FACEBOOK_SESSION" > facebook_session.json
+          echo "File size:"
           wc -c facebook_session.json
+          python3 -c "import json; json.load(open('facebook_session.json')); print('✅ JSON valid')" || echo "❌ JSON invalid"
 
       - name: Install dependencies
         run: |
@@ -27,8 +30,7 @@ jobs:
       - name: Run login check
         id: login_check
         run: |
-          xvfb-run -a python scraper.py
-          echo "exit_code=$?" >> $GITHUB_OUTPUT
+          xvfb-run -a python3 scraper.py
 
       - name: ✅ Login success message
         if: success()
