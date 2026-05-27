@@ -1,10 +1,3 @@
-Ah, Facebook threw a curveball. That is a security checkpoint modal. Because the session hasn't been fully active for a while, when the bot clicked the blue "Continue" button, Meta popped up a secondary authentication challenge to verify your password before letting you back into that specific profile.
-
-Since we are avoiding hardcoding your password in the script, the fix here is exactly the same as the main login fix: **we will detect the password popup, pause the script, and give you time to type it in.** Once you click "Log in" on that popup, the script will wait for the modal to disappear, save the new elevated session cookies (so you don't have to do this again next time), and resume navigating to the Marketplace.
-
-Here is the fully updated code with the modal detection integrated:
-
-```python
 import json
 import re
 import time
@@ -518,5 +511,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-```
