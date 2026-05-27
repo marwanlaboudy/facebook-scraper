@@ -13,9 +13,9 @@ jobs:
 
       - name: Load Facebook session
         env:
-          FACEBOOK_SESSION: ${{ secrets.FACEBOOK_SESSION }}
+          FB_SESSION: ${{ secrets.FB_SESSION }}
         run: |
-          printf '%s' "$FACEBOOK_SESSION" > facebook_session.json
+          printf '%s' "$FB_SESSION" > facebook_session.json
           echo "File size:"
           wc -c facebook_session.json
           python3 -c "import json; json.load(open('facebook_session.json')); print('✅ JSON valid')" || echo "❌ JSON invalid"
