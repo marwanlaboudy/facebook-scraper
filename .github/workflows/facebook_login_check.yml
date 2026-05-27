@@ -1,11 +1,11 @@
-name: Facebook Login Checker
+name: Facebook Marketplace Scraper
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [check-facebook-login]
+    types: [run-marketplace-scraper]
 
 jobs:
-  check:
+  scrape:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
@@ -24,24 +24,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y python3 python3-pip xvfb fonts-freefont-ttf
-          pip install playwright
+          pip install playwright gspread oauth2client
           playwright install --with-deps chromium
 
-      - name: Run login check
+      - name: Run scraper
+        env:
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
         run: |
           xvfb-run -a python3 scraper.py
 
-      - name: ✅ Login success message
-        if: success()
-        run: echo "🎉 Facebook session is VALID and logged in!"
-
-      - name: ❌ Login failed message
-        if: failure()
-        run: echo "💀 Facebook session is EXPIRED or INVALID!"
-
-      - name: Save screenshot
+      - name: Save results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: login-screenshot
-          path: login_check.png
+          name: results
+          path: |
+            marketplace_results.json
+            marketplace_hrefs.json
+            *.png
