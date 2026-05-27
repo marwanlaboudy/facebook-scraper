@@ -15,7 +15,7 @@ jobs:
         env:
           FACEBOOK_SESSION: ${{ secrets.FACEBOOK_SESSION }}
         run: |
-          echo "$FACEBOOK_SESSION" > facebook_session.json
+          printf '%s' "$FACEBOOK_SESSION" > facebook_session.json
           echo "File size:"
           wc -c facebook_session.json
           python3 -c "import json; json.load(open('facebook_session.json')); print('✅ JSON valid')" || echo "❌ JSON invalid"
@@ -28,7 +28,6 @@ jobs:
           playwright install --with-deps chromium
 
       - name: Run login check
-        id: login_check
         run: |
           xvfb-run -a python3 scraper.py
 
