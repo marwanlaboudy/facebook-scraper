@@ -44,10 +44,13 @@ def send_to_sheets(results):
     try:
         google_creds_raw = os.environ.get("GOOGLE_CREDS", "")
         if not google_creds_raw:
-            print("❌ GOOGLE_CREDS env variable is empty")
+            print("❌ GOOGLE_CREDS is empty")
             return
 
+        print(f"GOOGLE_CREDS first 50 chars: {google_creds_raw[:50]}")
+
         creds_dict = json.loads(google_creds_raw)
+        print(f"✅ JSON parsed — type: {creds_dict.get('type')} | email: {creds_dict.get('client_email')}")
 
         scope = [
             "https://spreadsheets.google.com/feeds",
@@ -72,6 +75,7 @@ def send_to_sheets(results):
 
     except json.JSONDecodeError as e:
         print(f"❌ GOOGLE_CREDS is not valid JSON: {e}")
+        print(f"   Raw value starts with: {google_creds_raw[:100]}")
     except Exception as e:
         print(f"❌ Google Sheets Error: {e}")
 
@@ -82,6 +86,23 @@ def bbox_ok(el):
         return bb and bb["width"] > 10 and bb["height"] > 5
     except Exception:
         return False
+
+def click_continue_if_present(page):
+    try:
+        btns = page.query_selector_all('[role="button"]')
+        for b in btns:
+            try:
+                if (b.inner_text() or "").strip().lower() == "continue":
+                    if bbox_ok(b):
+                        b.click()
+                        ok("Clicked Continue button")
+                        page.wait_for_timeout(5000)
+                        return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
 
 def stop_background_scroll(page):
     page.evaluate("""() => {
@@ -267,7 +288,12 @@ def main():
                             pass
 
         page.reload()
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(3000)
+
+        # Click Continue if present
+        click_continue_if_present(page)
+        page.wait_for_timeout(3000)
+        page.screenshot(path="after_continue.png")
 
         # Check login
         title = page.title()
