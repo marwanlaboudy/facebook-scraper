@@ -326,7 +326,7 @@ def main():
         count = posts.count()
         ok(f"Found {count} listing links")
 
-        for i in range(min(count, 30)):
+        for i in range(min(count, 5)):
             try:
                 href = posts.nth(i).get_attribute("href")
                 if href:
