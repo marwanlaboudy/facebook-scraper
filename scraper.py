@@ -1,3 +1,10 @@
+Ah, Facebook threw a curveball. That is a security checkpoint modal. Because the session hasn't been fully active for a while, when the bot clicked the blue "Continue" button, Meta popped up a secondary authentication challenge to verify your password before letting you back into that specific profile.
+
+Since we are avoiding hardcoding your password in the script, the fix here is exactly the same as the main login fix: **we will detect the password popup, pause the script, and give you time to type it in.** Once you click "Log in" on that popup, the script will wait for the modal to disappear, save the new elevated session cookies (so you don't have to do this again next time), and resume navigating to the Marketplace.
+
+Here is the fully updated code with the modal detection integrated:
+
+```python
 import json
 import re
 import time
@@ -102,7 +109,7 @@ def click_continue_if_present(page):
             if loc.count() > 0 and loc.first.is_visible():
                 loc.first.click()
                 ok("✅ Clicked 'Continue' profile button!")
-                page.wait_for_timeout(5000) # Wait for the redirect to finish
+                page.wait_for_timeout(3000) # Wait for next screen or modal
                 return True
     except Exception as e:
         warn(f"Continue check error: {e}")
@@ -303,9 +310,9 @@ def main():
 
         # Click Continue if present on main page
         click_continue_if_present(page)
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(2000)
 
-        # ── THE MANUAL LOGIN CHECK ──
+        # ── THE MAIN MANUAL LOGIN CHECK ──
         title = page.title().lower()
         url = page.url.lower()
         
@@ -319,13 +326,9 @@ def main():
             try:
                 # Wait for the email input to disappear (meaning login was successful and we navigated away)
                 email_input.wait_for(state="hidden", timeout=300000) # 5 minute timeout
-                
-                # Give Facebook a few seconds to fully load the feed
                 page.wait_for_timeout(5000)
                 
                 ok("✅ Detected successful manual login!")
-                
-                # Save the new session so you don't have to do this next time
                 context.storage_state(path=session_file)
                 ok(f"✅ Saved fresh session to {session_file}")
                 
@@ -335,16 +338,42 @@ def main():
                 context.close()
                 sys.exit(1)
         else:
-            ok("✅ Logged in successfully via existing session")
+            ok("✅ Main login bypassed successfully via existing session")
 
         # Go to marketplace
         for attempt in range(3):
             try:
                 page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=120000)
-                
-                # ── NEW: Handle the profile intercept screen here ──
                 page.wait_for_timeout(3000)
+                
+                # Check for profile intercept screen
                 click_continue_if_present(page)
+                page.wait_for_timeout(2000)
+                
+                # ── NEW: HANDLE PASSWORD CHALLENGE MODAL ──
+                pwd_input = page.locator('input[type="password"], input[name="pass"], input[placeholder="Password"]')
+                if pwd_input.count() > 0 and pwd_input.first.is_visible():
+                    warn("⚠️ PASSWORD VERIFICATION MODAL DETECTED!")
+                    warn("👉 Please type your password in the browser window and click 'Log in'.")
+                    warn("⏳ Pausing for up to 5 minutes...")
+                    
+                    try:
+                        pwd_input.first.wait_for(state="hidden", timeout=300000)
+                        page.wait_for_timeout(5000) # Give it time to load the next page
+                        
+                        ok("✅ Password accepted!")
+                        context.storage_state(path=session_file)
+                        ok(f"✅ Saved updated, authenticated session to {session_file}")
+                        
+                        # Re-navigate to marketplace just in case the login redirected us to the home feed
+                        log("Re-navigating to Marketplace to be safe...")
+                        page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
+                        page.wait_for_timeout(3000)
+                    except Exception:
+                        err("❌ Timeout waiting for password entry.")
+                        page.screenshot(path="password_timeout.png")
+                        context.close()
+                        sys.exit(1)
                 
                 break
             except Exception as e:
@@ -489,3 +518,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+```
