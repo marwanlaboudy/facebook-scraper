@@ -11,14 +11,11 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Load Facebook session
-        env:
-          FB_SESSION: ${{ secrets.FB_SESSION }}
+      - name: Unzip FB profile
         run: |
-          printf '%s' "$FB_SESSION" > facebook_session.json
-          echo "File size:"
-          wc -c facebook_session.json
-          python3 -c "import json; json.load(open('facebook_session.json')); print('✅ JSON valid')" || echo "❌ JSON invalid"
+          unzip fb_profile.zip
+          echo "Profile size:"
+          du -sh fb_profile/
 
       - name: Install dependencies
         run: |
@@ -41,6 +38,7 @@ jobs:
           path: |
             marketplace_results.json
             marketplace_hrefs.json
+            after_continue.png
             marketplace_loaded.png
             not_logged_in.png
             *.png
