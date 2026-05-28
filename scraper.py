@@ -262,7 +262,7 @@ def main():
 
     with sync_playwright() as pw:
         context = pw.chromium.launch_persistent_context(
-            user_data_dir="fb_profile",
+            user_data_dir="fb_profile_essential",
             headless=False,
             args=BROWSER_ARGS,
             no_viewport=True,
