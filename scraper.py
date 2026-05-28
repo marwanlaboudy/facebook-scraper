@@ -90,23 +90,22 @@ def bbox_ok(el):
 def click_continue_if_present(page):
     log("Checking for 'Continue' or 'Profile Confirmation' prompts...")
     try:
-        # Array of possible locators for Meta's Continue buttons
         possible_locators = [
             page.get_by_role("button", name=re.compile(r"^Continue$|^متابعة$", re.IGNORECASE)),
             page.locator('div[role="button"]:has-text("Continue")'),
             page.locator('div[aria-label="Continue"]'),
             page.locator('text="Continue"').locator("visible=true")
         ]
-        
+
         for loc in possible_locators:
             if loc.count() > 0 and loc.first.is_visible():
                 loc.first.click()
                 ok("✅ Clicked 'Continue' profile button!")
-                page.wait_for_timeout(3000) # Wait for next screen or modal
+                page.wait_for_timeout(3000)
                 return True
     except Exception as e:
         warn(f"Continue check error: {e}")
-        
+
     return False
 
 def stop_background_scroll(page):
@@ -262,119 +261,53 @@ def main():
     results = []
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False, args=BROWSER_ARGS, slow_mo=60)
-        context = browser.new_context()
+        context = pw.chromium.launch_persistent_context(
+            user_data_dir="fb_profile",
+            headless=False,
+            args=BROWSER_ARGS,
+            no_viewport=True,
+            slow_mo=60,
+        )
 
-        # ── PHASE 1: Collect listings & Handle Login ──
-        print("\n=== PHASE 1: COLLECTING LISTINGS & LOGIN ===")
+        # ── PHASE 1: Collect listings ─────────────────
+        print("\n=== PHASE 1: COLLECTING LISTINGS ===")
         _step = 0
-
-        # Load session safely
-        session_file = "facebook_session.json"
-        session = {}
-        try:
-            with open(session_file) as f:
-                session = json.load(f)
-            context.add_cookies(session.get("cookies", []))
-            log("Loaded existing cookies")
-        except (FileNotFoundError, json.JSONDecodeError):
-            warn("No valid session found. Will start fresh.")
 
         page = context.new_page()
 
-        # Restore localStorage
         log("Navigating to Facebook...")
         page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)
 
-        if "origins" in session:
-            for origin in session["origins"]:
-                if origin["origin"] == "https://www.facebook.com":
-                    for item in origin.get("localStorage", []):
-                        try:
-                            page.evaluate(
-                                f"localStorage.setItem({json.dumps(item['name'])}, {json.dumps(item['value'])})"
-                            )
-                        except Exception:
-                            pass
-
-        page.reload(wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
-
-        # Click Continue if present on main page
+        # Click Continue if present
         click_continue_if_present(page)
         page.wait_for_timeout(2000)
 
-        # ── THE MAIN MANUAL LOGIN CHECK ──
-        title = page.title().lower()
-        url = page.url.lower()
-        
-        email_input = page.locator('input[name="email"]')
-        
-        if "log in" in title or "login" in url or email_input.is_visible():
-            warn("⚠️ NOT LOGGED IN! The bot is pausing for you.")
-            warn("👉 Please log in manually in the opened browser window.")
-            warn("⏳ You have 5 minutes to enter your email, password, and any 2FA codes...")
-            
-            try:
-                # Wait for the email input to disappear (meaning login was successful and we navigated away)
-                email_input.wait_for(state="hidden", timeout=300000) # 5 minute timeout
-                page.wait_for_timeout(5000)
-                
-                ok("✅ Detected successful manual login!")
-                context.storage_state(path=session_file)
-                ok(f"✅ Saved fresh session to {session_file}")
-                
-            except Exception:
-                err("❌ Did not detect a successful login within 5 minutes.")
-                page.screenshot(path="login_timeout.png")
-                context.close()
-                sys.exit(1)
-        else:
-            ok("✅ Main login bypassed successfully via existing session")
+        # Check login
+        title = page.title()
+        url = page.url
+        log(f"Title: {title} | URL: {url}")
+        if "log in" in title.lower() or "login" in url.lower():
+            err("❌ NOT LOGGED IN — profile may be expired")
+            page.screenshot(path="not_logged_in.png")
+            context.close()
+            sys.exit(1)
+        ok("✅ Logged in successfully")
 
         # Go to marketplace
         for attempt in range(3):
             try:
                 page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=120000)
                 page.wait_for_timeout(3000)
-                
-                # Check for profile intercept screen
                 click_continue_if_present(page)
                 page.wait_for_timeout(2000)
-                
-                # ── NEW: HANDLE PASSWORD CHALLENGE MODAL ──
-                pwd_input = page.locator('input[type="password"], input[name="pass"], input[placeholder="Password"]')
-                if pwd_input.count() > 0 and pwd_input.first.is_visible():
-                    warn("⚠️ PASSWORD VERIFICATION MODAL DETECTED!")
-                    warn("👉 Please type your password in the browser window and click 'Log in'.")
-                    warn("⏳ Pausing for up to 5 minutes...")
-                    
-                    try:
-                        pwd_input.first.wait_for(state="hidden", timeout=300000)
-                        page.wait_for_timeout(5000) # Give it time to load the next page
-                        
-                        ok("✅ Password accepted!")
-                        context.storage_state(path=session_file)
-                        ok(f"✅ Saved updated, authenticated session to {session_file}")
-                        
-                        # Re-navigate to marketplace just in case the login redirected us to the home feed
-                        log("Re-navigating to Marketplace to be safe...")
-                        page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
-                        page.wait_for_timeout(3000)
-                    except Exception:
-                        err("❌ Timeout waiting for password entry.")
-                        page.screenshot(path="password_timeout.png")
-                        context.close()
-                        sys.exit(1)
-                
                 break
             except Exception as e:
                 warn(f"goto attempt {attempt+1} failed: {str(e)[:80]}")
                 if attempt == 2:
-                    err("Could not load Facebook Marketplace after 3 attempts.")
+                    err("Could not load marketplace after 3 attempts.")
                     context.close()
-                    sys.exit(1)
+                    return
                 time.sleep(3)
 
         page.wait_for_timeout(8000)
@@ -384,7 +317,7 @@ def main():
         count = posts.count()
         ok(f"Found {count} listing links")
 
-        for i in range(min(count, 5)):
+        for i in range(min(count, 30)):
             try:
                 href = posts.nth(i).get_attribute("href")
                 if href:
