@@ -17,6 +17,8 @@ jobs:
         run: |
           printf '%s' "$FB_PROFILE_ZIP" | base64 -d > fb_profile.zip
           unzip fb_profile.zip || true
+          find fb_profile -name "LOCK" -delete
+          chmod -R 755 fb_profile/
           echo "Profile size:"
           du -sh fb_profile/
 
