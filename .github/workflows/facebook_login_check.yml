@@ -15,10 +15,10 @@ jobs:
         env:
           FB_PROFILE_ZIP: ${{ secrets.FB_PROFILE_ZIP }}
         run: |
-          printf '%s' "$FB_PROFILE_ZIP" | base64 -d > fb_profile_essential.zip
-          unzip fb_profile_essential.zip -d .
+          printf '%s' "$FB_PROFILE_ZIP" | base64 -d > fb_profile.zip
+          unzip fb_profile.zip -d fb_profile
           echo "Profile size:"
-          du -sh fb_profile_essential/
+          du -sh fb_profile/
 
       - name: Install dependencies
         run: |
