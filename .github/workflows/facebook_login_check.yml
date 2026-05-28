@@ -11,11 +11,14 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Unzip FB profile
+      - name: Restore FB profile
+        env:
+          FB_PROFILE_ZIP: ${{ secrets.FB_PROFILE_ZIP }}
         run: |
-          unzip fb_profile.zip
+          printf '%s' "$FB_PROFILE_ZIP" | base64 -d > fb_profile_essential.zip
+          unzip fb_profile_essential.zip -d .
           echo "Profile size:"
-          du -sh fb_profile/
+          du -sh fb_profile_essential/
 
       - name: Install dependencies
         run: |
@@ -38,7 +41,4 @@ jobs:
           path: |
             marketplace_results.json
             marketplace_hrefs.json
-            after_continue.png
-            marketplace_loaded.png
-            not_logged_in.png
             *.png
