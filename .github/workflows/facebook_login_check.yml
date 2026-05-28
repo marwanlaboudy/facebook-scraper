@@ -16,9 +16,11 @@ jobs:
           FB_PROFILE_ZIP: ${{ secrets.FB_PROFILE_ZIP }}
         run: |
           printf '%s' "$FB_PROFILE_ZIP" | base64 -d > fb_profile.zip
-          unzip fb_profile.zip -d fb_profile
+          unzip fb_profile.zip
+          mkdir -p fb_profile_final
+          cp -r fb_profile/fb_profile/Default fb_profile_final/Default
           echo "Profile size:"
-          du -sh fb_profile/
+          du -sh fb_profile_final/
 
       - name: Install dependencies
         run: |
