@@ -17,10 +17,9 @@ jobs:
         run: |
           printf '%s' "$FB_PROFILE_ZIP" | base64 -d > fb_profile.zip
           unzip fb_profile.zip
-          mkdir -p fb_profile_final
-          cp -r fb_profile/fb_profile/Default fb_profile_final/Default
-          echo "Profile size:"
-          du -sh fb_profile_final/
+          echo "=== ZIP CONTENTS ==="
+          find . -type f | grep -v ".git" | sort
+          echo "=== DONE ==="
 
       - name: Install dependencies
         run: |
