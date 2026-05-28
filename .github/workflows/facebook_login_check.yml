@@ -16,10 +16,9 @@ jobs:
           FB_PROFILE_ZIP: ${{ secrets.FB_PROFILE_ZIP }}
         run: |
           printf '%s' "$FB_PROFILE_ZIP" | base64 -d > fb_profile.zip
-          unzip fb_profile.zip
-          echo "=== ZIP CONTENTS ==="
-          find . -type f | grep -v ".git" | sort
-          echo "=== DONE ==="
+          unzip fb_profile.zip || true
+          echo "Profile size:"
+          du -sh fb_profile/
 
       - name: Install dependencies
         run: |
