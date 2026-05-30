@@ -1,46 +1,60 @@
 name: Facebook Marketplace Scraper
+
 on:
-  workflow_dispatch:
-  repository_dispatch:
-    types: [run-marketplace-scraper]
+  workflow_dispatch:        # Run manually from GitHub Actions tab
+  schedule:
+    - cron: '0 8 * * *'    # Auto-run daily at 8:00 AM UTC (optional, remove if not needed)
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - name: Checkout repo
+      # ── 1. Checkout your repo ──────────────────────────────────
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Restore FB profile
-        env:
-          FB_PROFILE_ZIP: ${{ secrets.FB_PROFILE_ZIP }}
-        run: |
-          printf '%s' "$FB_PROFILE_ZIP" | base64 -d > fb_profile.zip
-          unzip fb_profile.zip || true
-          find fb_profile -name "LOCK" -delete
-          chmod -R 755 fb_profile/
-          echo "Profile size:"
-          du -sh fb_profile/
+      # ── 2. Set up Python ───────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Install dependencies
+      # ── 3. Install Python dependencies ────────────────────────
+      - name: Install Python packages
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3 python3-pip xvfb fonts-freefont-ttf
           pip install playwright gspread oauth2client
-          playwright install --with-deps chromium
 
-      - name: Run scraper
+      # ── 4. Install Playwright browsers + system deps ──────────
+      - name: Install Playwright Chromium
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+
+      # ── 5. Write Google credentials from secret ───────────────
+      - name: Write Google credentials
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
         run: |
-          xvfb-run -a python3 scraper.py
+          echo "$GOOGLE_CREDS" > google_creds.json
+          echo "[OK] google_creds.json written"
 
-      - name: Save results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: results
-          path: |
-            marketplace_results.json
-            marketplace_hrefs.json
-            *.png
+      # ── 6. Write Facebook session from secret ────────────────
+      - name: Write Facebook session
+        env:
+          FB_SESSION: ${{ secrets.FB_SESSION }}
+        run: |
+          echo "$FB_SESSION" > facebook_session.json
+          echo "[OK] facebook_session.json written"
+
+      # ── 7. Run the scraper ────────────────────────────────────
+      - name: Run scraper
+        env:
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
+          DISPLAY: ":99"
+        run: |
+          # Start virtual display (needed for headless Chromium on Linux)
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          python main.py
