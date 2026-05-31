@@ -1,60 +1,53 @@
 name: Facebook Marketplace Scraper
-
 on:
-  workflow_dispatch:        # Run manually from GitHub Actions tab
+  workflow_dispatch:
   schedule:
-    - cron: '0 8 * * *'    # Auto-run daily at 8:00 AM UTC (optional, remove if not needed)
+    - cron: '0 8 * * *'
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
-      # ── 1. Checkout your repo ──────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Set up Python ───────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ── 3. Install Python dependencies ────────────────────────
       - name: Install Python packages
         run: |
           pip install playwright gspread oauth2client
 
-      # ── 4. Install Playwright browsers + system deps ──────────
       - name: Install Playwright Chromium
         run: |
           playwright install chromium
           playwright install-deps chromium
 
-      # ── 5. Write Google credentials from secret ───────────────
+      - name: Install Xvfb
+        run: |
+          sudo apt-get install -y xvfb
+
       - name: Write Google credentials
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
         run: |
           echo "$GOOGLE_CREDS" > google_creds.json
-          echo "[OK] google_creds.json written"
 
-      # ── 6. Write Facebook session from secret ────────────────
       - name: Write Facebook session
         env:
           FB_SESSION: ${{ secrets.FB_SESSION }}
         run: |
           echo "$FB_SESSION" > facebook_session.json
-          echo "[OK] facebook_session.json written"
 
-      # ── 7. Run the scraper ────────────────────────────────────
-      - name: Run scraper
+      - name: Run scrapers
         env:
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
           DISPLAY: ":99"
         run: |
-          # Start virtual display (needed for headless Chromium on Linux)
           Xvfb :99 -screen 0 1920x1080x24 &
           sleep 2
+          python sendmessages.py
           python main.py
