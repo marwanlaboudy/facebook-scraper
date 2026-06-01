@@ -1,8 +1,7 @@
 name: Facebook Marketplace Scraper
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 8 * * *'
+
 
 jobs:
   scrape:
