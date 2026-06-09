@@ -12,7 +12,7 @@ if sys.platform == "win32":
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # ── CONFIG ──────────────────────────────────────────────
-SEARCH_URL     = "https://www.facebook.com/marketplace/cairo/search/?category_id=1270772586445798&query=Home%20Sales&referral_ui_component=category_menu_item"
+SEARCH_URL     = "https://www.facebook.com/marketplace/cairo/search?minPrice=2500000&daysSinceListed=1&query=Home%20Sales&category_id=1270772586445798&exact=false&referral_ui_component=category_menu_item"
 HREFS_FILE     = "marketplace_hrefs.json"
 RESULTS_FILE   = "marketplace_results.json"
 CUSTOM_MESSAGE = "ممكن رقم التواصل لأنه مخفي في البوست؟"
