@@ -417,7 +417,7 @@ def main():
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
-            headless=False,
+            headless=True,
             args=BROWSER_ARGS,
             slow_mo=60,
         )
