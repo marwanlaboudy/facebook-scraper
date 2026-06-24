@@ -21,6 +21,13 @@ PHONE_REGEX = r"(?:(?:\+|00)?2)?(01[0125](?:[\s\-\.]*[0-9]){8})"
 SKIP_PREFIXES = ["You:", "أنت:", "All", "Unread", "Groups", "Communities",
                  "الكل", "غير مقروء", "المجموعات", "Marketplace", "ماركت بليس", "السوق"]
 
+# Regex patterns for names that are UI noise, not real chats
+SKIP_PATTERNS = [
+    r"^\d+\s+new\s+messages?$",           # "5 new messages"
+    r"^\d+\s+new\s+message\s+requests?$", # "3 new message requests"
+    r"^\d+\s+رسائل?\s+جديدة?$",           # Arabic equivalent
+]
+
 BROWSER_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--start-maximized",
@@ -180,6 +187,11 @@ def should_skip(name):
         return True
     for prefix in SKIP_PREFIXES:
         if name.strip().startswith(prefix):
+            return True
+    # Skip UI noise like "5 new messages"
+    for pattern in SKIP_PATTERNS:
+        if re.match(pattern, name.strip(), re.IGNORECASE):
+            print(f"    [SKIP] Filtered UI noise: '{name}'")
             return True
     return False
 
@@ -466,6 +478,27 @@ def get_seller_name_from_page(page):
         pass
     page.wait_for_timeout(2000)
 
+    # Guard: make sure we're on a real profile page, not our own account
+    try:
+        current_url = page.url
+        # If we ended up on our own profile or homepage, bail out
+        if current_url in ("https://www.facebook.com/", "https://www.facebook.com"):
+            print("    [WARN] Redirected to homepage, not a seller profile")
+            return ""
+        # Detect if the page looks like our own profile (has "Edit profile" button)
+        own_profile = page.evaluate("""() => {
+            const btns = Array.from(document.querySelectorAll('[role="button"]'));
+            return btns.some(b => {
+                const t = (b.textContent || '').toLowerCase();
+                return t.includes('edit profile') || t.includes('تعديل الملف الشخصي');
+            });
+        }""")
+        if own_profile:
+            print("    [WARN] Landed on own profile page — skipping seller name extraction")
+            return ""
+    except Exception as e:
+        print(f"    [WARN] Profile guard check failed: {e}")
+
     try:
         name = page.evaluate("""() => {
             const allSpans = Array.from(document.querySelectorAll('span[dir="auto"]'));
@@ -612,13 +645,11 @@ def main():
 
         print("[1] Opening Facebook...")
         page.goto(START_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(8000)  # increased from 4000 to 8000
+        page.wait_for_timeout(8000)
 
-        # Screenshot to help debug if things go wrong
         page.screenshot(path="debug_after_load.png")
         print("    [DBG] Screenshot saved: debug_after_load.png")
 
-        # Check if we're actually logged in
         current_url = page.url
         print(f"    [DBG] Current URL: {current_url}")
         if "login" in current_url or "checkpoint" in current_url:
