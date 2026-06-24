@@ -1,25 +1,26 @@
-import time
-import sys
 import json
 import re
+import time
+import sys
 import os
 from playwright.sync_api import sync_playwright
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# ── WINDOWS UTF-8 FIX ───────────────────────────────────
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # ── CONFIG ──────────────────────────────────────────────
-START_URL    = "https://www.facebook.com"
-RESULTS_FILE = "marketplace_chat_numbers.json"
-
-PHONE_REGEX = r"(?:(?:\+|00)?2)?(01[0125](?:[\s\-\.]*[0-9]){8})"
-
-SKIP_PREFIXES = ["You:", "أنت:", "All", "Unread", "Groups", "Communities",
-                 "الكل", "غير مقروء", "المجموعات", "Marketplace", "ماركت بليس", "السوق"]
+SEARCH_URL     = "https://www.facebook.com/marketplace/cairo/search?minPrice=2500000&daysSinceListed=1&query=Home%20Sales&category_id=1270772586445798&exact=false&referral_ui_component=category_menu_item"
+HREFS_FILE     = "marketplace_hrefs.json"
+RESULTS_FILE   = "marketplace_results.json"
+SESSION_FILE   = "facebook_session.json"
+CUSTOM_MESSAGE = "ممكن رقم التواصل لأنه مخفي في البوست؟"
+PHONE_REGEX    = r"\b01[0-9]{9}\b"
+PHONE_BLACKLIST = {
+    "01281283097",
+}
 
 BROWSER_ARGS = [
     "--disable-blink-features=AutomationControlled",
@@ -30,10 +31,125 @@ BROWSER_ARGS = [
     "--ignore-certificate-errors",
 ]
 
+# ── LOGGING ──────────────────────────────────────────────
+_step = 0
+def log(msg):
+    global _step
+    _step += 1
+    print(f"[{_step}] {msg}", flush=True)
+def ok(msg):   print(f"    [OK]   {msg}", flush=True)
+def info(msg): print(f"    [...]  {msg}", flush=True)
+def warn(msg): print(f"    [WARN] {msg}", flush=True)
+def err(msg):  print(f"    [ERR]  {msg}", flush=True)
+
+
+# ── SESSION MANAGEMENT ────────────────────────────────────
+def is_session_valid(session_data: dict) -> bool:
+    """
+    Check if the saved session is still likely valid.
+    Looks for key Facebook auth cookies (c_user, xs) and checks expiry.
+    """
+    if not session_data or "cookies" not in session_data:
+        return False
+
+    cookies = {c["name"]: c for c in session_data["cookies"]}
+
+    # These two cookies must exist for a Facebook session to be active
+    if "c_user" not in cookies or "xs" not in cookies:
+        warn("Session missing critical cookies (c_user / xs)")
+        return False
+
+    # Check expiry of c_user cookie (Facebook sets this ~90 days out)
+    c_user = cookies["c_user"]
+    expiry = c_user.get("expires", -1)
+    if expiry != -1 and expiry < time.time():
+        warn("Session cookie has expired")
+        return False
+
+    ok(f"Session looks valid — logged in as user ID: {c_user.get('value', '?')}")
+    return True
+
+
+def login_and_save_session(pw) -> dict:
+    """
+    Opens a visible (headed) browser so you can log in manually.
+    Saves cookies to SESSION_FILE once you're on the home feed.
+    Returns the session dict.
+    """
+    print("\n" + "=" * 60)
+    print("SESSION LOGIN — Manual login required")
+    print("=" * 60)
+    print("  A browser window will open. Log in to Facebook.")
+    print("  Once you see your home feed, come back here and press ENTER.")
+    print("=" * 60)
+
+    browser = pw.chromium.launch(
+        headless=False,   # Must be headed so you can type credentials
+        args=BROWSER_ARGS,
+        slow_mo=60,
+    )
+    context = browser.new_context()
+    page = context.new_page()
+    page.goto("https://www.facebook.com/login", wait_until="domcontentloaded", timeout=60000)
+
+    input("\n  >>> Press ENTER after you have fully logged in to Facebook <<<\n")
+
+    # Save cookies + localStorage snapshot
+    cookies = context.cookies()
+    session_data = {"cookies": cookies}
+
+    with open(SESSION_FILE, "w", encoding="utf-8") as f:
+        json.dump(session_data, f, ensure_ascii=False, indent=4)
+
+    ok(f"Session saved to '{SESSION_FILE}' ({len(cookies)} cookies)")
+
+    context.close()
+    browser.close()
+
+    return session_data
+
+
+def load_or_refresh_session(pw) -> dict:
+    """
+    Loads session from disk. If it doesn't exist or is expired,
+    triggers a fresh manual login and saves the new session.
+    """
+    if os.path.exists(SESSION_FILE):
+        try:
+            with open(SESSION_FILE, encoding="utf-8") as f:
+                session_data = json.load(f)
+            if is_session_valid(session_data):
+                ok(f"Reusing existing session from '{SESSION_FILE}'")
+                return session_data
+            else:
+                warn("Existing session is invalid or expired — re-logging in")
+        except (json.JSONDecodeError, KeyError) as e:
+            warn(f"Could not read session file: {e} — re-logging in")
+    else:
+        info(f"No session file found at '{SESSION_FILE}' — first-time login")
+
+    return login_and_save_session(pw)
+
+
+def refresh_session_if_redirected(page, context) -> bool:
+    """
+    Call this after navigating to a page. Returns True if we got
+    redirected to login (meaning the session expired mid-run).
+    When that happens, the caller should abort and re-run the script
+    so load_or_refresh_session() triggers a fresh login.
+    """
+    current_url = page.url
+    if "login" in current_url or "checkpoint" in current_url:
+        err("Facebook redirected to login — session expired mid-run!")
+        err(f"Delete '{SESSION_FILE}' and re-run the script to log in again.")
+        return True
+    return False
+
+
 # ── GOOGLE SHEETS ─────────────────────────────────────────
 def send_to_sheets(results):
     print("\n" + "=" * 60)
-    print("SENDING TO GOOGLE SHEETS (Sheet 2)")
+    print("SENDING TO GOOGLE SHEETS")
     print("=" * 60)
 
     print("\n[STEP 1] Loading credentials...")
@@ -72,16 +188,11 @@ def send_to_sheets(results):
         print(f"  [ERR] Authorization failed: {e}")
         return
 
-    print("\n[STEP 3] Opening spreadsheet 'marketplace_leads' — Sheet 2...")
+    print("\n[STEP 3] Opening spreadsheet 'marketplace_leads'...")
     try:
         spreadsheet = client.open("marketplace_leads")
-        worksheets = spreadsheet.worksheets()
-        if len(worksheets) >= 2:
-            sheet = worksheets[1]
-            print(f"  [OK] Opened existing sheet: '{sheet.title}'")
-        else:
-            sheet = spreadsheet.add_worksheet(title="Sheet2", rows="1000", cols="2")
-            print(f"  [OK] Created new sheet: '{sheet.title}'")
+        sheet = spreadsheet.sheet1
+        print(f"  [OK] Opened sheet: '{sheet.title}'")
     except gspread.exceptions.SpreadsheetNotFound:
         print("  [ERR] Spreadsheet 'marketplace_leads' not found.")
         print(f"  Fix   : Share it with: {creds_dict.get('client_email')}")
@@ -94,7 +205,7 @@ def send_to_sheets(results):
     try:
         existing = sheet.get_all_values()
         if not existing:
-            sheet.append_row(["Name", "Number"])
+            sheet.append_row(["URL", "Seller Name", "Phone", "Message Sent"])
             print("  [OK] Header row written")
         else:
             print(f"  [OK] Sheet has {len(existing)} row(s) — skipping header")
@@ -107,20 +218,21 @@ def send_to_sheets(results):
     fail_count = 0
 
     for i, r in enumerate(results):
-        if not r.get("phones"):
-            continue
-        phones_str = ", ".join(r["phones"])
-        seller = r.get("seller_name", "").strip()
-        row = [seller, phones_str]
+        row = [
+            r.get("url", ""),
+            r.get("seller_name") or "",
+            r.get("phone") or "",
+            str(r.get("message_sent", ""))
+        ]
         try:
             sheet.append_row(row)
             success_count += 1
-            print(f"  [OK]  Row {i+1} | name={seller[:40]} | phone={phones_str}")
+            print(f"  [OK]  Row {i+1}/{len(results)} | name={row[1]} | phone={row[2]} | {row[3]} | {row[0][:50]}")
         except gspread.exceptions.APIError as e:
             fail_count += 1
             status = getattr(e, 'response', None)
             code   = status.status_code if status else "?"
-            print(f"  [ERR] Row {i+1} failed (HTTP {code}): {e}")
+            print(f"  [ERR] Row {i+1}/{len(results)} failed (HTTP {code}): {e}")
             if code == 429:
                 print("        Rate limited — waiting 60s before retrying...")
                 time.sleep(60)
@@ -141,566 +253,475 @@ def send_to_sheets(results):
     print("\n" + "-" * 40)
     print(f"  Rows written : {success_count}")
     print(f"  Rows failed  : {fail_count}")
+    if fail_count == 0:
+        print("  Status       : ✅ All rows written successfully")
+    else:
+        print("  Status       : ⚠️  Some rows failed")
     print("-" * 40)
 
-# ── HELPERS ─────────────────────────────────────────────
-def normalize_arabic_numerals(text):
-    if not text:
-        return ""
-    arabic_to_english = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
-    return text.translate(arabic_to_english)
 
-def extract_phones(text):
-    if not text:
-        return []
-    normalized = normalize_arabic_numerals(text)
-    matches = re.findall(PHONE_REGEX, normalized)
-    results = []
-    for m in matches:
-        clean = re.sub(r'[\s\-\.]', '', m)
-        if clean.startswith('201'):
-            clean = clean[1:]
-        if clean not in results:
-            results.append(clean)
-    return results
-
-def is_within_24h(aria_label):
-    if not aria_label:
+# ── HELPERS ──────────────────────────────────────────────
+def bbox_ok(el):
+    try:
+        bb = el.bounding_box()
+        return bb and bb["width"] > 10 and bb["height"] > 5
+    except Exception:
         return False
-    label = aria_label.lower().strip()
-    if "minute" in label or "just now" in label or "second" in label:
-        return True
-    match = re.match(r'(\d+)\s+hour', label)
-    if match and int(match.group(1)) <= 23:
-        return True
-    return False
 
-def should_skip(name):
-    if not name or len(name.strip()) < 5:
-        return True
-    for prefix in SKIP_PREFIXES:
-        if name.strip().startswith(prefix):
-            return True
-    return False
-
-def open_messenger_popup(page):
-    for label in ["Messenger", "مراسلة"]:
-        el = page.query_selector(f'[aria-label="{label}"][role="button"]')
-        if el:
-            el.click(force=True)
-            page.wait_for_timeout(1500)
-            return True
-    return False
-
-def click_marketplace_tab(page):
-    print("    Looking for Marketplace INSIDE messenger popup...")
-    try:
-        popup = page.locator('[aria-label*="Chats"], [aria-label*="الدردشات"]').first
-        marketplace = popup.locator('text="Marketplace"').first
-        if marketplace.is_visible():
-            marketplace.click(force=True)
-            page.wait_for_timeout(2000)
-            print("    [OK] Clicked Messenger Marketplace tab")
-            return True
-    except Exception as e:
-        print(f"    [WARN] Primary method failed: {e}")
-
-    try:
-        dialogs = page.locator('[role="dialog"]')
-        for i in range(dialogs.count()):
-            dialog = dialogs.nth(i)
-            el = dialog.locator('text="Marketplace"').first
-            if el.count() > 0 and el.is_visible():
-                el.click(force=True)
-                page.wait_for_timeout(2000)
-                print("    [OK] Clicked Marketplace inside dialog")
-                return True
-    except Exception as e:
-        print(f"    [WARN] Fallback failed: {e}")
-
-    return False
-
-def scroll_chat_list(page, scrolls=8):
-    print(f"    Scrolling chat list ({scrolls} scrolls)...")
-    try:
-        scrolled = page.evaluate("""(scrolls) => {
-            const abbr = document.querySelector('abbr[aria-label]');
-            if (!abbr) return false;
-            let node = abbr;
-            for (let i = 0; i < 20; i++) {
-                node = node.parentElement;
-                if (!node) break;
-                const style = window.getComputedStyle(node);
-                if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
-                    for (let s = 0; s < scrolls; s++) {
-                        node.scrollTop += 300;
-                    }
-                    return true;
-                }
-            }
-            return false;
-        }""", scrolls)
-        if scrolled:
-            page.wait_for_timeout(2000)
-            print("    [OK] Scrolled chat list")
-        else:
-            page.mouse.wheel(0, 3000)
-            page.wait_for_timeout(2000)
-    except Exception as e:
-        print(f"    [WARN] Scroll failed: {e}")
-
-def collect_chat_data(page):
-    return page.evaluate("""() => {
-        const results = [];
-        const seen = new Set();
-        const abbrs = document.querySelectorAll('abbr[aria-label]');
-        for (const abbr of abbrs) {
-            const timeLabel = abbr.getAttribute('aria-label') || '';
-            let node = abbr;
-            let chatName = '';
-            for (let i = 0; i < 25; i++) {
-                node = node.parentElement;
-                if (!node) break;
-                const titleSpan = node.querySelector(
-                    'span.x1lliihq.x6ikm8r.x10wlt62.x1n2onr6.xlyipyv.xuxw1ft:not(.x1j85h84)'
-                );
-                if (titleSpan) {
-                    const txt = titleSpan.textContent.trim();
-                    if (txt.length > 5 && !seen.has(txt)) {
-                        chatName = txt;
-                        seen.add(txt);
-                        break;
-                    }
-                }
-            }
-            if (chatName) {
-                results.push({ name: chatName, time: timeLabel });
-            }
-        }
-        return results;
+def stop_background_scroll(page):
+    page.evaluate("""() => {
+        document.body.style.overflow = 'hidden';
+        document.documentElement.style.overflow = 'hidden';
+        const highId = window.setInterval(() => {}, 99999);
+        for (let i = 0; i <= highId; i++) window.clearInterval(i);
     }""")
+    ok("Background scroll frozen")
 
-def find_and_click_chat(page, chat_name):
-    return page.evaluate("""(targetName) => {
-        const spans = document.querySelectorAll(
-            'span.x1lliihq.x6ikm8r.x10wlt62.x1n2onr6.xlyipyv.xuxw1ft:not(.x1j85h84)'
-        );
-        for (const span of spans) {
-            if (span.textContent.trim() === targetName) {
-                let node = span;
-                for (let i = 0; i < 10; i++) {
-                    node = node.parentElement;
-                    if (!node) break;
-                    if (node.getAttribute('role') === 'link' ||
-                        node.getAttribute('role') === 'button' ||
-                        node.tagName === 'A') {
-                        node.click();
-                        return true;
-                    }
-                }
-                span.click();
-                return true;
-            }
-        }
-        const allSpans = document.querySelectorAll('span');
-        for (const span of allSpans) {
-            const txt = span.textContent.trim();
-            if (txt === targetName || (targetName.length > 30 && targetName.startsWith(txt) && txt.length > 20)) {
-                let node = span;
-                for (let i = 0; i < 15; i++) {
-                    node = node.parentElement;
-                    if (!node) break;
-                    if (node.getAttribute('role') === 'link' ||
-                        node.getAttribute('role') === 'button' ||
-                        node.tagName === 'A') {
-                        node.click();
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }""", chat_name)
-
-def go_back_to_chat_list(page):
+def close_any_dialog(page):
     try:
-        for label in ["Back", "رجوع"]:
-            back = page.query_selector(f'[aria-label="{label}"][role="button"]')
-            if back and back.is_visible():
-                back.click(force=True)
-                page.wait_for_timeout(1500)
+        for label in ["Close", "إغلاق", "Cancel", "إلغاء"]:
+            btn = page.query_selector(f'[aria-label="{label}"][role="button"]')
+            if btn and bbox_ok(btn):
+                btn.click()
+                page.wait_for_timeout(1000)
+                ok(f"Closed dialog via '{label}'")
                 return True
-    except Exception:
-        pass
-    try:
-        open_messenger_popup(page)
-        click_marketplace_tab(page)
-        page.wait_for_timeout(1500)
-        return True
     except Exception:
         pass
     return False
 
-def wait_for_chat_load(page, chat_name, timeout=8):
+def extract_seller_name(page):
+    try:
+        els = page.query_selector_all('a[href*="/marketplace/profile/"]')
+        for el in els:
+            spans = el.query_selector_all('span')
+            for span in spans:
+                txt = (span.inner_text() or "").strip()
+                if txt and len(txt) > 2 and txt.lower() not in [
+                    "seller details", "seller info", "view profile",
+                    "see profile", "see seller", "تفاصيل البائع",
+                    "profile", "بائع"
+                ]:
+                    return txt
+    except Exception:
+        pass
+
+    try:
+        els = page.query_selector_all('h2 span')
+        for el in els:
+            txt = (el.inner_text() or "").strip()
+            if txt and len(txt) > 2:
+                return txt
+    except Exception:
+        pass
+
+    return None
+
+def extract_phone_from_page(page):
+    try:
+        close_any_dialog(page)
+        page.wait_for_timeout(500)
+
+        description_selectors = [
+            '[data-testid="marketplace-pdp-description"]',
+            '[class*="marketplace"][class*="description"]',
+            'div[dir="auto"]',
+        ]
+
+        for selector in description_selectors:
+            try:
+                els = page.query_selector_all(selector)
+                for el in els:
+                    if bbox_ok(el):
+                        text = el.inner_text()
+                        for match in re.finditer(PHONE_REGEX, text):
+                            phone = match.group(0)
+                            if phone not in PHONE_BLACKLIST:
+                                return phone
+            except Exception:
+                continue
+
+        body_text = page.evaluate("""() => {
+            const dialogs = document.querySelectorAll('[role="dialog"]');
+            const hidden = [];
+            for (const d of dialogs) {
+                hidden.push([d, d.style.display]);
+                d.style.display = 'none';
+            }
+            const text = document.body.innerText;
+            for (const [d, display] of hidden) {
+                d.style.display = display;
+            }
+            return text;
+        }""")
+
+        for match in re.finditer(PHONE_REGEX, body_text):
+            phone = match.group(0)
+            if phone not in PHONE_BLACKLIST:
+                return phone
+
+    except Exception as e:
+        warn(f"Phone extraction error: {e}")
+
+    return None
+
+def open_message_dialog(page):
+    log("Clicking Message button")
+    for label in ["Message", "Send message", "Message seller", "Contact seller", "مراسلة", "إرسال رسالة"]:
+        try:
+            els = page.query_selector_all(f'[aria-label="{label}"]')
+            for el in els:
+                if bbox_ok(el):
+                    el.click()
+                    ok(f"Opened dialog using '{label}'")
+                    return True
+        except Exception:
+            continue
+    try:
+        for btn in page.query_selector_all('[role="button"], button'):
+            if bbox_ok(btn):
+                txt = (btn.inner_text() or "").strip().lower()
+                if any(k in txt for k in ["message", "chat", "send", "contact", "مراسلة", "إرسال"]):
+                    btn.scroll_into_view_if_needed()
+                    btn.click()
+                    ok("Opened dialog via button text")
+                    return True
+    except Exception:
+        pass
+    return False
+
+def wait_for_dialog(page, timeout=10):
+    log("Waiting for message dialog")
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            body = page.locator("body").text_content() or ""
-            if chat_name[:20] in body:
-                return True
-        except Exception:
-            pass
+        el = page.query_selector('textarea[placeholder]')
+        if el and bbox_ok(el):
+            ok("Dialog textarea found")
+            return True
+        el = page.query_selector('[aria-label="Send message"], [aria-label="Send"]')
+        if el and bbox_ok(el):
+            ok("Send button found")
+            return True
         time.sleep(0.5)
     return False
 
-def scan_chat_for_phones(page, already_seen):
-    candidates = page.evaluate("""() => {
-        const results = [];
-        const labeled = [
-            document.querySelector('[role="main"]'),
-            document.querySelector('[data-pagelet="MWChat"]'),
-            document.querySelector('[aria-label="Messages"]'),
-            document.querySelector('[aria-label="رسائل"]'),
-        ];
-        for (const c of labeled) {
-            if (c) {
-                const txt = Array.from(c.querySelectorAll('[dir="auto"]'))
-                    .map(s => s.textContent).join(' ');
-                if (txt.trim().length > 50) results.push(txt);
-            }
-        }
-        const allScrollable = Array.from(document.querySelectorAll('*')).filter(el => {
-            const s = window.getComputedStyle(el);
-            const rect = el.getBoundingClientRect();
-            return (s.overflowY === 'auto' || s.overflowY === 'scroll') &&
-                   el.scrollHeight > 200 &&
-                   rect.width > 400;
-        });
-        for (const el of allScrollable) {
-            const txt = Array.from(el.querySelectorAll('[dir="auto"]'))
-                .map(s => s.textContent).join(' ');
-            if (txt.trim().length > 50) results.push(txt);
-        }
-        return results;
-    }""")
-
-    if not candidates:
-        print(f"    [DBG] No candidates found")
-        return []
-
-    best_text = max(candidates, key=len)
-    print(f"    [DBG] Best candidate: {len(best_text)} chars from {len(candidates)} sources")
-    all_phones = extract_phones(best_text)
-    new_phones = [p for p in all_phones if p not in already_seen]
-    print(f"    [DBG] All phones: {all_phones} → new only: {new_phones}")
-    return new_phones
-
-# ── SELLER PROFILE ───────────────────────────────────────
-
-def get_seller_profile_url(page):
-    url = page.evaluate("""() => {
-        const links = Array.from(document.querySelectorAll('a[href*="/marketplace/profile/"], a[href*="profile.php"]'));
-        for (const link of links) {
-            const txt = (link.textContent || '').trim().toLowerCase();
-            const aria = (link.getAttribute('aria-label') || '').toLowerCase();
-            if (txt.includes('seller') || txt.includes('profile') ||
-                txt.includes('بائع') || aria.includes('seller') ||
-                aria.includes('profile') || aria.includes('بائع')) {
-                return link.href;
-            }
-        }
-        for (const link of links) {
-            const rect = link.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0) return link.href;
-        }
-        return null;
-    }""")
-    return url
-
-def get_seller_name_from_page(page):
+def find_dialog_textarea(page):
+    for ph in ["Please type your message to the seller", "Type a message",
+               "Write a message", "اكتب رسالة", "اكتب رسالتك"]:
+        try:
+            el = page.query_selector(f'textarea[placeholder="{ph}"]')
+            if el and bbox_ok(el):
+                ok("Found textarea via placeholder")
+                return el
+        except Exception:
+            continue
     try:
-        page.wait_for_load_state("networkidle", timeout=8000)
+        el = page.query_selector('[role="dialog"] textarea, [role="dialog"] [contenteditable="true"]')
+        if el and bbox_ok(el):
+            ok("Found textarea inside dialog")
+            return el
     except Exception:
         pass
-    page.wait_for_timeout(2000)
+    try:
+        for ta in page.query_selector_all("textarea"):
+            if bbox_ok(ta):
+                ok("Using visible textarea")
+                return ta
+    except Exception:
+        pass
+    try:
+        for ce in page.query_selector_all('div[contenteditable="true"]'):
+            if bbox_ok(ce):
+                ok("Using contenteditable div")
+                return ce
+    except Exception:
+        pass
+    return None
+
+def clear_and_type(page, el, text):
+    tag = el.evaluate("e => e.tagName.toLowerCase()")
+    info(f"Element type: {tag}")
+    try:
+        el.scroll_into_view_if_needed()
+        time.sleep(0.2)
+        el.click()
+        time.sleep(0.3)
+        page.keyboard.press("Control+a")
+        time.sleep(0.2)
+        page.keyboard.type(text, delay=35)
+        time.sleep(0.3)
+        current = el.input_value() if tag == "textarea" else el.inner_text()
+        if text[:10] in current:
+            ok("Typing method 1 worked")
+            return True
+    except Exception as e:
+        warn(f"Typing method 1 failed: {e}")
+    try:
+        if tag == "textarea":
+            page.evaluate("""([el, val]) => {
+                const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+                setter.call(el, val);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }""", [el, text])
+        else:
+            page.evaluate("""([el, val]) => {
+                el.focus();
+                document.execCommand('insertText', false, val);
+            }""", [el, text])
+        ok("Typing method 2 worked")
+        return True
+    except Exception as e:
+        warn(f"Typing method 2 failed: {e}")
+    return False
+
+def click_send(page, input_el):
+    log("Finding send button")
 
     try:
-        name = page.evaluate("""() => {
-            const allSpans = Array.from(document.querySelectorAll('span[dir="auto"]'));
-            let joinedIndex = -1;
-            for (let i = 0; i < allSpans.length; i++) {
-                if (allSpans[i].textContent.trim().startsWith('Joined Facebook') ||
-                    allSpans[i].textContent.trim().startsWith('انضم إلى فيسبوك') ||
-                    allSpans[i].textContent.trim().startsWith('انضمت إلى فيسبوك')) {
-                    joinedIndex = i;
-                    break;
-                }
-            }
-            if (joinedIndex < 1) return '';
-            for (let i = joinedIndex - 1; i >= 0; i--) {
-                const txt = allSpans[i].textContent.trim();
-                const lower = txt.toLowerCase();
-                if (txt.length < 2 || txt.length > 80) continue;
-                if (lower.includes('listing') || lower.includes('active') ||
-                    lower.includes('joined') || lower.includes('facebook') ||
-                    lower.includes('follow') || lower.includes('message') ||
-                    lower.includes('marketplace') || lower.includes('notification') ||
-                    lower.includes('inbox') || lower.includes('selling') ||
-                    lower.includes('buying') || lower.includes('browse') ||
-                    /^\\d+$/.test(txt)) continue;
-                return txt;
-            }
-            return '';
-        }""")
-        if name and len(name) > 1:
-            print(f"    [OK] Seller name (before 'Joined Facebook'): {name}")
-            return name
-    except Exception as e:
-        print(f"    [WARN] Strategy 1 failed: {e}")
+        for label in ["Send Message", "Send message", "إرسال الرسالة", "إرسال"]:
+            btn = page.query_selector(f'[aria-label="{label}"][role="button"]')
+            if btn and bbox_ok(btn):
+                btn.click()
+                ok(f"Clicked send button via aria-label '{label}'")
+                return True
+    except Exception:
+        pass
 
     try:
-        name = page.evaluate("""() => {
-            const m = document.querySelector('meta[property="og:title"]');
-            return m ? m.getAttribute('content') : '';
-        }""")
-        if name and len(name) > 1 and "facebook" not in name.lower() and "marketplace" not in name.lower():
-            print(f"    [OK] Seller name from og:title: {name}")
-            return name
-    except Exception as e:
-        print(f"    [WARN] Strategy 2 failed: {e}")
+        for btn in page.query_selector_all('[role="dialog"] [role="button"]'):
+            if bbox_ok(btn):
+                txt = (btn.inner_text() or "").strip()
+                if txt.lower() in ["send message", "send", "إرسال الرسالة", "إرسال"]:
+                    btn.click()
+                    ok(f"Clicked send via text: '{txt}'")
+                    return True
+    except Exception:
+        pass
 
     try:
-        title = page.title()
-        for sep in [" | ", " - "]:
-            if sep in title:
-                candidate = title.split(sep)[0].strip()
-                if candidate and "facebook" not in candidate.lower() and "marketplace" not in candidate.lower():
-                    print(f"    [OK] Seller name from page title: {candidate}")
-                    return candidate
-    except Exception as e:
-        print(f"    [WARN] Strategy 3 failed: {e}")
+        btns = page.query_selector_all('[role="dialog"] [role="button"]')
+        if btns:
+            last_btn = btns[-1]
+            if bbox_ok(last_btn):
+                last_btn.click()
+                ok("Clicked last button in dialog")
+                return True
+    except Exception:
+        pass
 
-    try:
-        name = page.evaluate("""() => {
-            const el = document.querySelector('span.x14qwyeo.xw06pyt.x579bpy.xjkpybl');
-            return el ? el.textContent.trim() : '';
-        }""")
-        if name and len(name) > 1:
-            print(f"    [OK] Seller name (CSS class fallback): {name}")
-            return name
-    except Exception as e:
-        print(f"    [WARN] Strategy 4 failed: {e}")
+    warn("Send button not found → pressing Enter")
+    input_el.press("Enter")
+    ok("Pressed Enter")
+    return True
 
-    print("    [WARN] Could not extract seller name")
-    return ""
 
-def fetch_seller_name(page, chat_name):
-    print("    Getting seller profile URL...")
-    profile_url = get_seller_profile_url(page)
-
-    if not profile_url:
-        print("    [WARN] No seller profile link found in chat")
-        return ""
-
-    print(f"    [DBG] Profile URL: {profile_url[:80]}")
-
-    try:
-        page.goto(profile_url, wait_until="domcontentloaded", timeout=20000)
-    except Exception as e:
-        print(f"    [ERR] Could not navigate to profile: {e}")
-        _restore_marketplace(page)
-        return ""
-
-    current_url = page.url
-    print(f"    [DBG] Landed on: {current_url[:80]}")
-
-    if "facebook.com" not in current_url or current_url == "https://www.facebook.com/":
-        print("    [WARN] Profile navigation redirected to homepage")
-        _restore_marketplace(page)
-        return ""
-
-    seller_name = get_seller_name_from_page(page)
-    _restore_marketplace(page)
-    return seller_name
-
-def _restore_marketplace(page):
-    print("    Returning to Facebook and reopening Marketplace...")
-    try:
-        page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=20000)
-        page.wait_for_timeout(3000)
-    except Exception as e:
-        print(f"    [WARN] Could not navigate to homepage: {e}")
-        return
-
-    if not open_messenger_popup(page):
-        print("    [WARN] Could not reopen Messenger popup")
-        return
-
-    if not click_marketplace_tab(page):
-        print("    [WARN] Could not reopen Marketplace tab")
-        return
-
-    page.wait_for_timeout(1500)
-    print("    [OK] Back at Marketplace chat list")
-
-# ── MAIN ────────────────────────────────────────────────
+# ── MAIN ─────────────────────────────────────────────────
 def main():
+    global _step
+    hrefs = []
     results = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
+    with sync_playwright() as pw:
+
+        # ── SESSION: load saved or trigger fresh login ──
+        print("\n=== SESSION CHECK ===")
+        session_data = load_or_refresh_session(pw)
+
+        browser = pw.chromium.launch(
             headless=True,
             args=BROWSER_ARGS,
-            slow_mo=50,
+            slow_mo=60,
         )
         context = browser.new_context()
+        context.add_cookies(session_data["cookies"])
 
-        session_file = "facebook_session.json"
-        if not os.path.exists(session_file):
-            print(f"[ERR] '{session_file}' not found.")
-            browser.close()
-            return
-
-        with open(session_file) as f:
-            session = json.load(f)
-        context.add_cookies(session["cookies"])
-        print("[OK] Loaded cookies from facebook_session.json")
+        # ── PHASE 1: Collect listings ─────────────────
+        print("\n=== PHASE 1: COLLECTING LISTINGS ===")
+        _step = 0
 
         page = context.new_page()
 
-        print("[1] Opening Facebook...")
-        page.goto(START_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(4000)
+        for attempt in range(3):
+            try:
+                page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=120000)
+                break
+            except Exception as e:
+                warn(f"goto attempt {attempt+1} failed: {str(e)[:80]}")
+                if attempt == 2:
+                    err("Could not load Facebook after 3 attempts.")
+                    context.close()
+                    return
+                time.sleep(3)
 
-        print("[2] Opening Messenger popup...")
-        if not open_messenger_popup(page):
-            print("    [ERR] Could not find Messenger button")
+        page.wait_for_timeout(8000)
+
+        # ── Check if session was silently rejected ──
+        if refresh_session_if_redirected(page, context):
+            # Delete the bad session file so next run forces re-login
+            if os.path.exists(SESSION_FILE):
+                os.remove(SESSION_FILE)
+                warn(f"Deleted stale '{SESSION_FILE}' — please re-run the script.")
+            context.close()
             browser.close()
             return
-        print("    [OK] Messenger popup opened")
 
-        print("[3] Clicking Marketplace tab...")
-        if not click_marketplace_tab(page):
-            print("    [ERR] Could not find Marketplace tab")
-            browser.close()
-            return
-        print("    [OK] Marketplace tab opened")
-        page.wait_for_timeout(2000)
+        page.screenshot(path="marketplace_loaded.png")
 
-        print("[4] Scrolling to load all chats...")
-        scroll_chat_list(page, scrolls=10)
+        posts = page.locator('a[href*="/marketplace/item/"]')
+        count = posts.count()
+        ok(f"Found {count} listing links")
 
-        print("[5] Scanning chat list...")
-        chat_data = collect_chat_data(page)
-        print(f"    Found {len(chat_data)} entries from JS scan")
+        for i in range(min(count, 30)):
+            try:
+                href = posts.nth(i).get_attribute("href")
+                if href:
+                    href = "https://www.facebook.com" + href if href.startswith("/") else href
+                    href = href.split("&__tn__")[0]
+                    if href not in hrefs:
+                        hrefs.append(href)
+            except Exception:
+                pass
 
-        seen_names = set()
-        recent_chats = []
-        skipped_old = 0
+        ok(f"Collected {len(hrefs)} unique listings")
+        with open(HREFS_FILE, "w", encoding="utf-8") as f:
+            json.dump(hrefs, f, ensure_ascii=False, indent=4)
 
-        for chat in chat_data:
-            name = chat["name"].strip()
-            time_label = chat["time"]
-            if should_skip(name):
-                continue
-            if name in seen_names:
-                continue
-            if not is_within_24h(time_label):
-                skipped_old += 1
-                continue
-            seen_names.add(name)
-            recent_chats.append(chat)
-            print(f"    [+] ({time_label}): {name[:70]}")
+        # ── Save refreshed cookies after a successful page load ──
+        # This extends the effective session life on each run
+        refreshed_cookies = context.cookies()
+        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump({"cookies": refreshed_cookies}, f, ensure_ascii=False, indent=4)
+        ok("Session cookies refreshed and saved")
 
-        print(f"    Skipped {skipped_old} chats older than 24h")
-        print(f"\n[6] Found {len(recent_chats)} valid chats within 24h")
+        page.close()
 
-        all_seen_phones = set()
+        # ── PHASE 2: Extract phones or send messages ──
+        print("\n=== PHASE 2: EXTRACTION & MESSAGING ===")
+        _step = 0
 
-        for i, chat in enumerate(recent_chats):
-            chat_name = chat["name"].strip()
-            time_label = chat["time"]
+        for index, href in enumerate(hrefs):
+            print("\n" + "=" * 60)
+            print(f"[LISTING {index+1}/{len(hrefs)}]")
+            print(href)
 
-            print(f"\n{'='*60}")
-            print(f"[Chat {i+1}/{len(recent_chats)}] ({time_label})")
-            print(f"    Name: {chat_name[:80]}")
-
-            seller_name = ""
+            page = context.new_page()
 
             try:
-                go_back_to_chat_list(page)
-                scroll_chat_list(page, scrolls=3)
-                page.wait_for_timeout(1000)
+                log("Opening listing")
+                try:
+                    page.goto(href, wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    try:
+                        page.goto(href, wait_until="load", timeout=60000)
+                    except Exception as e2:
+                        err(f"Could not load page: {str(e2)[:80]}")
+                        results.append({"url": href, "seller_name": None, "phone": None, "message_sent": "FAILED_LOAD"})
+                        page.close()
+                        continue
 
-                clicked = False
-                for attempt in range(3):
-                    clicked = find_and_click_chat(page, chat_name)
-                    if clicked:
-                        break
-                    print(f"    [RETRY {attempt+1}] Chat not found, scrolling more...")
-                    scroll_chat_list(page, scrolls=3)
-                    page.wait_for_timeout(1000)
+                # Check for session expiry mid-run
+                if refresh_session_if_redirected(page, context):
+                    if os.path.exists(SESSION_FILE):
+                        os.remove(SESSION_FILE)
+                    err("Stopping — please re-run the script to log in again.")
+                    page.close()
+                    break
 
-                if not clicked:
-                    print(f"    [ERR] Could not find chat after retries — skipping")
-                    results.append({"chat_name": chat_name, "seller_name": "",
-                                    "time": time_label, "phones": [], "note": "NOT_FOUND"})
+                page.wait_for_timeout(5000)
+
+                log("Extracting seller name")
+                seller_name = extract_seller_name(page)
+                if seller_name:
+                    ok(f"Seller name: {seller_name}")
+                else:
+                    warn("No seller name found")
+
+                log("Searching for phone number")
+                phone = extract_phone_from_page(page)
+
+                if phone:
+                    ok(f"Phone found: {phone}")
+                    results.append({"url": href, "seller_name": seller_name, "phone": phone, "message_sent": False})
+                    with open(RESULTS_FILE, "w", encoding="utf-8") as f:
+                        json.dump(results, f, ensure_ascii=False, indent=4)
+                    page.close()
                     continue
 
-                print("    [OK] Clicked chat")
-                wait_for_chat_load(page, chat_name, timeout=8)
+                warn("No phone found → opening message dialog")
+                opened = open_message_dialog(page)
+                if not opened:
+                    warn("Could not open message dialog")
+                    results.append({"url": href, "seller_name": seller_name, "phone": None, "message_sent": "FAILED_NO_DIALOG"})
+                    page.close()
+                    continue
+
+                time.sleep(2)
+                stop_background_scroll(page)
+                time.sleep(1)
+                wait_for_dialog(page, timeout=10)
+
+                log("Finding textarea")
+                input_el = None
+                for attempt in range(5):
+                    input_el = find_dialog_textarea(page)
+                    if input_el:
+                        break
+                    time.sleep(1)
+
+                if not input_el:
+                    warn("Could not find textarea")
+                    page.screenshot(path=f"error_no_input_{index}.png")
+                    results.append({"url": href, "seller_name": seller_name, "phone": None, "message_sent": "FAILED_NO_INPUT"})
+                    page.close()
+                    continue
+
+                log("Typing custom message")
+                clear_and_type(page, input_el, CUSTOM_MESSAGE)
+                time.sleep(1)
+
+                click_send(page, input_el)
                 page.wait_for_timeout(2000)
 
-                current_url = page.url
-                if "photo" in current_url or "/posts/" in current_url:
-                    print(f"    [WARN] Wrong page detected")
-                    go_back_to_chat_list(page)
-                    results.append({"chat_name": chat_name, "seller_name": "",
-                                    "time": time_label, "phones": [], "note": "WRONG_PAGE"})
-                    continue
-
-                phones = scan_chat_for_phones(page, already_seen=all_seen_phones)
-
-                if phones:
-                    print(f"    [OK] Numbers found: {phones}")
-                    all_seen_phones.update(phones)
-                    seller_name = fetch_seller_name(page, chat_name)
-                    if seller_name:
-                        print(f"    [OK] Seller name: {seller_name}")
-                    else:
-                        print(f"    [--] Seller name not retrieved")
+                dialog_still_open = page.query_selector('[role="dialog"]')
+                if not dialog_still_open:
+                    ok("Message sent — dialog closed!")
                 else:
-                    print(f"    [--] No phone number found")
+                    warn("Dialog still open — trying Enter key")
+                    input_el.press("Enter")
+                    page.wait_for_timeout(2000)
 
-                results.append({
-                    "chat_name": chat_name,
-                    "seller_name": seller_name,
-                    "time": time_label,
-                    "phones": phones
-                })
-
+                results.append({"url": href, "seller_name": seller_name, "phone": None, "message_sent": True})
                 with open(RESULTS_FILE, "w", encoding="utf-8") as f:
                     json.dump(results, f, ensure_ascii=False, indent=4)
 
+                page.wait_for_timeout(2000)
+                page.close()
+
             except Exception as e:
-                print(f"    [ERR] {str(e)[:100]}")
+                err(str(e))
                 try:
-                    go_back_to_chat_list(page)
+                    page.screenshot(path=f"failure_{index}.png")
                 except Exception:
                     pass
-                results.append({"chat_name": chat_name, "seller_name": seller_name,
-                                "time": time_label, "phones": [], "note": f"CRASH: {str(e)[:60]}"})
+                results.append({"url": href, "seller_name": None, "phone": None, "message_sent": "FAILED_CRASH"})
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
-        print(f"\n{'='*60}")
-        print(f"[DONE] Processed {len(recent_chats)} chats")
-        print(f"Results saved to: {RESULTS_FILE}")
-        found = [r for r in results if r["phones"]]
-        print(f"\nNumbers found in {len(found)}/{len(results)} chats:")
-        for r in found:
-            print(f"  {r['phones']} — seller: {r.get('seller_name', '')} — chat: {r['chat_name'][:50]}")
-
-        # ── AUTO-UPLOAD (no input() needed in CI) ──
+        context.close()
         browser.close()
+
+    # ── Summary ───────────────────────────────────────
+    print("\n" + "=" * 60)
+    found  = [r for r in results if r.get("phone")]
+    sent   = [r for r in results if r.get("message_sent") is True]
+    failed = [r for r in results if str(r.get("message_sent", "")).startswith("FAILED")]
+
+    print(f"Phones found:  {len(found)}/{len(results)}")
+    print(f"Messages sent: {len(sent)}/{len(results)}")
+    print(f"Failures:      {len(failed)}/{len(results)}")
 
     send_to_sheets(results)
 
