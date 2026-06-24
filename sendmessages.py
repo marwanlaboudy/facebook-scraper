@@ -15,6 +15,7 @@ if sys.platform == "win32":
 SEARCH_URL     = "https://www.facebook.com/marketplace/cairo/search?minPrice=2500000&daysSinceListed=1&query=Home%20Sales&category_id=1270772586445798&exact=false&referral_ui_component=category_menu_item"
 HREFS_FILE     = "marketplace_hrefs.json"
 RESULTS_FILE   = "marketplace_results.json"
+SESSION_FILE   = "facebook_session.json"
 CUSTOM_MESSAGE = "ممكن رقم التواصل لأنه مخفي في البوست؟"
 PHONE_REGEX    = r"\b01[0-9]{9}\b"
 PHONE_BLACKLIST = {
@@ -40,6 +41,110 @@ def ok(msg):   print(f"    [OK]   {msg}", flush=True)
 def info(msg): print(f"    [...]  {msg}", flush=True)
 def warn(msg): print(f"    [WARN] {msg}", flush=True)
 def err(msg):  print(f"    [ERR]  {msg}", flush=True)
+
+
+# ── SESSION MANAGEMENT ────────────────────────────────────
+def is_session_valid(session_data: dict) -> bool:
+    """
+    Check if the saved session is still likely valid.
+    Looks for key Facebook auth cookies (c_user, xs) and checks expiry.
+    """
+    if not session_data or "cookies" not in session_data:
+        return False
+
+    cookies = {c["name"]: c for c in session_data["cookies"]}
+
+    # These two cookies must exist for a Facebook session to be active
+    if "c_user" not in cookies or "xs" not in cookies:
+        warn("Session missing critical cookies (c_user / xs)")
+        return False
+
+    # Check expiry of c_user cookie (Facebook sets this ~90 days out)
+    c_user = cookies["c_user"]
+    expiry = c_user.get("expires", -1)
+    if expiry != -1 and expiry < time.time():
+        warn("Session cookie has expired")
+        return False
+
+    ok(f"Session looks valid — logged in as user ID: {c_user.get('value', '?')}")
+    return True
+
+
+def login_and_save_session(pw) -> dict:
+    """
+    Opens a visible (headed) browser so you can log in manually.
+    Saves cookies to SESSION_FILE once you're on the home feed.
+    Returns the session dict.
+    """
+    print("\n" + "=" * 60)
+    print("SESSION LOGIN — Manual login required")
+    print("=" * 60)
+    print("  A browser window will open. Log in to Facebook.")
+    print("  Once you see your home feed, come back here and press ENTER.")
+    print("=" * 60)
+
+    browser = pw.chromium.launch(
+        headless=False,   # Must be headed so you can type credentials
+        args=BROWSER_ARGS,
+        slow_mo=60,
+    )
+    context = browser.new_context()
+    page = context.new_page()
+    page.goto("https://www.facebook.com/login", wait_until="domcontentloaded", timeout=60000)
+
+    input("\n  >>> Press ENTER after you have fully logged in to Facebook <<<\n")
+
+    # Save cookies + localStorage snapshot
+    cookies = context.cookies()
+    session_data = {"cookies": cookies}
+
+    with open(SESSION_FILE, "w", encoding="utf-8") as f:
+        json.dump(session_data, f, ensure_ascii=False, indent=4)
+
+    ok(f"Session saved to '{SESSION_FILE}' ({len(cookies)} cookies)")
+
+    context.close()
+    browser.close()
+
+    return session_data
+
+
+def load_or_refresh_session(pw) -> dict:
+    """
+    Loads session from disk. If it doesn't exist or is expired,
+    triggers a fresh manual login and saves the new session.
+    """
+    if os.path.exists(SESSION_FILE):
+        try:
+            with open(SESSION_FILE, encoding="utf-8") as f:
+                session_data = json.load(f)
+            if is_session_valid(session_data):
+                ok(f"Reusing existing session from '{SESSION_FILE}'")
+                return session_data
+            else:
+                warn("Existing session is invalid or expired — re-logging in")
+        except (json.JSONDecodeError, KeyError) as e:
+            warn(f"Could not read session file: {e} — re-logging in")
+    else:
+        info(f"No session file found at '{SESSION_FILE}' — first-time login")
+
+    return login_and_save_session(pw)
+
+
+def refresh_session_if_redirected(page, context) -> bool:
+    """
+    Call this after navigating to a page. Returns True if we got
+    redirected to login (meaning the session expired mid-run).
+    When that happens, the caller should abort and re-run the script
+    so load_or_refresh_session() triggers a fresh login.
+    """
+    current_url = page.url
+    if "login" in current_url or "checkpoint" in current_url:
+        err("Facebook redirected to login — session expired mid-run!")
+        err(f"Delete '{SESSION_FILE}' and re-run the script to log in again.")
+        return True
+    return False
+
 
 # ── GOOGLE SHEETS ─────────────────────────────────────────
 def send_to_sheets(results):
@@ -153,6 +258,7 @@ def send_to_sheets(results):
     else:
         print("  Status       : ⚠️  Some rows failed")
     print("-" * 40)
+
 
 # ── HELPERS ──────────────────────────────────────────────
 def bbox_ok(el):
@@ -409,6 +515,7 @@ def click_send(page, input_el):
     ok("Pressed Enter")
     return True
 
+
 # ── MAIN ─────────────────────────────────────────────────
 def main():
     global _step
@@ -416,17 +523,18 @@ def main():
     results = []
 
     with sync_playwright() as pw:
+
+        # ── SESSION: load saved or trigger fresh login ──
+        print("\n=== SESSION CHECK ===")
+        session_data = load_or_refresh_session(pw)
+
         browser = pw.chromium.launch(
             headless=True,
             args=BROWSER_ARGS,
             slow_mo=60,
         )
         context = browser.new_context()
-
-        # Load cookies
-        with open("facebook_session.json") as f:
-            session = json.load(f)
-        context.add_cookies(session["cookies"])
+        context.add_cookies(session_data["cookies"])
 
         # ── PHASE 1: Collect listings ─────────────────
         print("\n=== PHASE 1: COLLECTING LISTINGS ===")
@@ -442,12 +550,22 @@ def main():
                 warn(f"goto attempt {attempt+1} failed: {str(e)[:80]}")
                 if attempt == 2:
                     err("Could not load Facebook after 3 attempts.")
-                    input("Press ENTER to close...")
                     context.close()
                     return
                 time.sleep(3)
 
         page.wait_for_timeout(8000)
+
+        # ── Check if session was silently rejected ──
+        if refresh_session_if_redirected(page, context):
+            # Delete the bad session file so next run forces re-login
+            if os.path.exists(SESSION_FILE):
+                os.remove(SESSION_FILE)
+                warn(f"Deleted stale '{SESSION_FILE}' — please re-run the script.")
+            context.close()
+            browser.close()
+            return
+
         page.screenshot(path="marketplace_loaded.png")
 
         posts = page.locator('a[href*="/marketplace/item/"]')
@@ -468,6 +586,13 @@ def main():
         ok(f"Collected {len(hrefs)} unique listings")
         with open(HREFS_FILE, "w", encoding="utf-8") as f:
             json.dump(hrefs, f, ensure_ascii=False, indent=4)
+
+        # ── Save refreshed cookies after a successful page load ──
+        # This extends the effective session life on each run
+        refreshed_cookies = context.cookies()
+        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump({"cookies": refreshed_cookies}, f, ensure_ascii=False, indent=4)
+        ok("Session cookies refreshed and saved")
 
         page.close()
 
@@ -494,6 +619,14 @@ def main():
                         results.append({"url": href, "seller_name": None, "phone": None, "message_sent": "FAILED_LOAD"})
                         page.close()
                         continue
+
+                # Check for session expiry mid-run
+                if refresh_session_if_redirected(page, context):
+                    if os.path.exists(SESSION_FILE):
+                        os.remove(SESSION_FILE)
+                    err("Stopping — please re-run the script to log in again.")
+                    page.close()
+                    break
 
                 page.wait_for_timeout(5000)
 
