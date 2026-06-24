@@ -183,13 +183,55 @@ def should_skip(name):
             return True
     return False
 
+# ── MESSENGER POPUP (IMPROVED) ───────────────────────────
 def open_messenger_popup(page):
-    for label in ["Messenger", "مراسلة"]:
-        el = page.query_selector(f'[aria-label="{label}"][role="button"]')
+    labels = ["Messenger", "مراسلة", "Chats", "الدردشات"]
+    for label in labels:
+        el = page.query_selector(f'[aria-label="{label}"]')
         if el:
+            try:
+                el.click(force=True)
+                page.wait_for_timeout(1500)
+                print(f"    [OK] Found Messenger button with label: '{label}'")
+                return True
+            except Exception:
+                continue
+
+    # Fallback: find by href link
+    el = page.query_selector('a[href*="messenger.com"], a[href*="/messages/"]')
+    if el:
+        try:
             el.click(force=True)
             page.wait_for_timeout(1500)
+            print("    [OK] Found Messenger via href fallback")
             return True
+        except Exception:
+            pass
+
+    # Fallback: find SVG messenger icon by role
+    try:
+        btns = page.query_selector_all('[role="button"]')
+        for btn in btns:
+            aria = (btn.get_attribute("aria-label") or "").lower()
+            if "mess" in aria or "chat" in aria or "دردش" in aria or "رسائل" in aria:
+                btn.click(force=True)
+                page.wait_for_timeout(1500)
+                print(f"    [OK] Found Messenger button via fuzzy aria: '{aria}'")
+                return True
+    except Exception as e:
+        print(f"    [WARN] Fuzzy button search failed: {e}")
+
+    # Debug: dump all aria-labels on the page to help diagnose
+    try:
+        all_labels = page.evaluate("""() => {
+            return Array.from(document.querySelectorAll('[aria-label]'))
+                .map(el => el.getAttribute('aria-label'))
+                .filter(l => l && l.length < 60);
+        }""")
+        print(f"    [DBG] All aria-labels on page: {all_labels[:30]}")
+    except Exception:
+        pass
+
     return False
 
 def click_marketplace_tab(page):
@@ -570,11 +612,24 @@ def main():
 
         print("[1] Opening Facebook...")
         page.goto(START_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(8000)  # increased from 4000 to 8000
+
+        # Screenshot to help debug if things go wrong
+        page.screenshot(path="debug_after_load.png")
+        print("    [DBG] Screenshot saved: debug_after_load.png")
+
+        # Check if we're actually logged in
+        current_url = page.url
+        print(f"    [DBG] Current URL: {current_url}")
+        if "login" in current_url or "checkpoint" in current_url:
+            print("    [ERR] Session expired or login required. Please refresh facebook_session.json")
+            browser.close()
+            return
 
         print("[2] Opening Messenger popup...")
         if not open_messenger_popup(page):
-            print("    [ERR] Could not find Messenger button")
+            page.screenshot(path="debug_messenger_fail.png")
+            print("    [ERR] Could not find Messenger button. Screenshot saved: debug_messenger_fail.png")
             browser.close()
             return
         print("    [OK] Messenger popup opened")
@@ -699,7 +754,6 @@ def main():
         for r in found:
             print(f"  {r['phones']} — seller: {r.get('seller_name', '')} — chat: {r['chat_name'][:50]}")
 
-        # ── AUTO-UPLOAD (no input() needed in CI) ──
         browser.close()
 
     send_to_sheets(results)
